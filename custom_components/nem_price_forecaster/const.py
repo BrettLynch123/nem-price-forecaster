@@ -103,7 +103,38 @@ CALIBRATION_SAVE_INTERVAL_MINUTES = 30
 CONF_SIDECAR_URL = "sidecar_url"
 DEFAULT_SIDECAR_URL = "http://localhost:8765"
 
-# NOTE: the price model + calibrator are configured in the SIDECAR (add-on
-# options or docker env via SIDECAR_PRICE_MODEL / SIDECAR_CALIBRATOR), NOT in
-# this integration.  The former CONF_PRICE_MODEL config-flow selector was dead
-# (never forwarded to the sidecar) and has been removed.
+# ---------------------------------------------------------------------------
+# Price model + calibrator selection
+#
+# These ARE forwarded to the sidecar at runtime via POST /config (see
+# sidecar_client.async_post_config), so the picker is now live: changing it in
+# the config flow / options flow reconfigures the running sidecar and triggers a
+# re-predict.  (The previous dead selector that never reached the sidecar has
+# been replaced with this working wiring.)
+# ---------------------------------------------------------------------------
+CONF_PRICE_MODEL = "price_model"
+CONF_CALIBRATOR = "calibrator"
+
+# Price models — must match the sidecar's _VALID_PRICE_MODELS.
+PRICE_MODEL_DARTS_NAIVE_BLEND = "darts_naive_blend"
+PRICE_MODEL_ISOTONIC = "isotonic"
+PRICE_MODEL_DARTS = "darts"
+PRICE_MODEL_HYBRID = "hybrid"
+PRICE_MODEL_OPTIONS = [
+    PRICE_MODEL_ISOTONIC,
+    PRICE_MODEL_DARTS_NAIVE_BLEND,
+    PRICE_MODEL_DARTS,
+    PRICE_MODEL_HYBRID,
+]
+
+# Calibrators — must match the sidecar's _VALID_CALIBRATORS.
+CALIBRATOR_ISOTONIC = "isotonic"
+CALIBRATOR_MONOTONE_GBM = "monotone_gbm"
+CALIBRATOR_OPTIONS = [
+    CALIBRATOR_MONOTONE_GBM,
+    CALIBRATOR_ISOTONIC,
+]
+
+# Defaults mirror the sidecar's SidecarConfig defaults.
+DEFAULT_PRICE_MODEL = PRICE_MODEL_ISOTONIC
+DEFAULT_CALIBRATOR = CALIBRATOR_MONOTONE_GBM

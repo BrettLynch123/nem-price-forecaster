@@ -28,7 +28,16 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN, PLATFORMS
+from .const import (
+    CONF_CALIBRATOR,
+    CONF_PRICE_MODEL,
+    CONF_SIDECAR_URL,
+    DEFAULT_CALIBRATOR,
+    DEFAULT_PRICE_MODEL,
+    DEFAULT_SIDECAR_URL,
+    DOMAIN,
+    PLATFORMS,
+)
 from .coordinator import NemPriceForecastCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,6 +54,13 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN][config_entry.entry_id] = coordinator
+
+    # Apply the stored price_model / calibrator to the sidecar so the runtime
+    # config stays consistent with the integration's choice.  This runs on every
+    # setup, which also covers options-flow changes (the update listener reloads
+    # the entry, re-running setup).  Best-effort — a transiently-down sidecar
+    # does not block setup.
+    await _async_apply_model_config(config_entry)
 
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
@@ -77,3 +93,39 @@ async def _async_update_listener(
 ) -> None:
     """Handle options update: reload the entry so the new tariff takes effect."""
     await hass.config_entries.async_reload(config_entry.entry_id)
+
+
+async def _async_apply_model_config(config_entry: ConfigEntry) -> None:
+    """
+    Push the entry's stored price_model + calibrator to the sidecar (best-effort).
+
+    Options take precedence over the initial install data.  Never raises — a
+    sidecar that is briefly unreachable must not break entry setup.
+    """
+    merged = {**config_entry.data, **config_entry.options}
+    price_model = merged.get(CONF_PRICE_MODEL, DEFAULT_PRICE_MODEL)
+    calibrator = merged.get(CONF_CALIBRATOR, DEFAULT_CALIBRATOR)
+    sidecar_url = merged.get(CONF_SIDECAR_URL, DEFAULT_SIDECAR_URL)
+
+    try:
+        from .sidecar_client import SidecarClient, SidecarUnavailable
+
+        client = SidecarClient(sidecar_url)
+        try:
+            await client.async_post_config(
+                price_model=price_model, calibrator=calibrator
+            )
+            _LOGGER.debug(
+                "Applied stored model config to sidecar: price_model=%s calibrator=%s",
+                price_model,
+                calibrator,
+            )
+        except SidecarUnavailable as apply_error:
+            _LOGGER.debug(
+                "Could not apply model config to sidecar (non-fatal): %s",
+                apply_error,
+            )
+        finally:
+            await client.async_close()
+    except Exception as unexpected:  # pragma: no cover - never block setup
+        _LOGGER.debug("Sidecar model-config apply skipped: %s", unexpected)

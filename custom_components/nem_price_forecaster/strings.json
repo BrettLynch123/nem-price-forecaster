@@ -3,15 +3,19 @@
     "step": {
       "user": {
         "title": "NEM Price Forecaster — Region & Calibration",
-        "description": "Configure your NEM region and calibration settings. Available regions: {regions}",
+        "description": "Configure your NEM region, price forecast method, and calibration settings. Available regions: {regions}",
         "data": {
           "region": "NEM Region",
+          "price_model": "Price forecast method",
+          "calibrator": "Calibrator",
           "calibration_window_days": "Calibration observation window (days)",
           "calibration_min_observations": "Minimum observations before calibration activates",
           "plausibility_cap_dollars_per_kwh": "Price plausibility cap ($/kWh)"
         },
         "data_description": {
           "region": "Your NEM dispatch region (e.g. QLD1 for Queensland)",
+          "price_model": "Which forecasting method the sidecar uses. Isotonic is the most robust default; the Darts options use machine learning. This is sent to the sidecar live — no restart needed.",
+          "calibrator": "How raw PD7DAY prices are mapped to realised prices. Monotone-GBM is the bake-off winner and can never do worse than isotonic.",
           "calibration_window_days": "How many days of historical (predicted, actual) price pairs to retain for calibration. Older observations are down-weighted exponentially.",
           "calibration_min_observations": "Number of (predicted, actual) pairs required before isotonic calibration activates. Until then, raw PD7DAY / 1000 is used.",
           "plausibility_cap_dollars_per_kwh": "Calibrated prices above this cap are clamped. Protects against extreme market cap events propagating to retail prices."
@@ -63,8 +67,10 @@
   "options": {
     "step": {
       "init": {
-        "title": "Update Tariff & Forecast Settings",
+        "title": "Update Model, Tariff & Forecast Settings",
         "data": {
+          "price_model": "Price forecast method",
+          "calibrator": "Calibrator",
           "gst_rate": "GST rate",
           "fixed_adder_per_kwh": "Fixed network adder ($/kWh, pre-GST)",
           "feed_in_is_wholesale": "Feed-in price = wholesale",
@@ -72,6 +78,10 @@
           "forecast_horizon_hours": "Forecast horizon (hours)",
           "forecast_period_minutes": "Forecast period / resolution (minutes)",
           "tou_bands_json": "ToU bands (JSON array, leave blank to keep current)"
+        },
+        "data_description": {
+          "price_model": "Applied to the sidecar immediately and re-predicts. Isotonic is the robust default; the Darts options use machine learning.",
+          "calibrator": "How raw PD7DAY prices map to realised prices. Monotone-GBM is the bake-off winner and never does worse than isotonic."
         }
       }
     },

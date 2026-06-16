@@ -39,6 +39,7 @@ import asyncio
 import logging
 import os
 import sys
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -49,7 +50,7 @@ from pydantic import BaseModel, Field
 # Ensure sidecar app/ is on the path (for Docker and local tests)
 sys.path.insert(0, os.path.dirname(__file__))
 
-from config import load_config, SidecarConfig
+from config import load_config, SidecarConfig, _VALID_PRICE_MODELS, _VALID_CALIBRATORS
 from forecast_cache import ForecastCache, ForecastMetadata
 from observation_store import ObservationStore
 from price_engine import PriceEngine
@@ -73,6 +74,11 @@ _observation_store: Optional[ObservationStore] = None
 _price_engine: Optional[PriceEngine] = None
 _load_engine: Optional[LoadEngine] = None
 _scheduler = None
+
+# Guards the runtime price-model / calibrator swap (POST /config).  The predict
+# cycle runs on the APScheduler thread, so mutating _sidecar_config + rebuilding
+# the calibrators must be serialised against a concurrent predict.
+_config_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -218,6 +224,29 @@ class LoadObservationRequest(BaseModel):
 class TriggerResponse(BaseModel):
     triggered: bool
     message: str
+
+
+class ConfigResponse(BaseModel):
+    """Effective runtime forecast configuration."""
+    price_model: str
+    calibrator: str
+    region: str
+
+
+class ConfigUpdateRequest(BaseModel):
+    """
+    Runtime config change.  Either field may be omitted to leave it unchanged;
+    at least one must be supplied.  Values are validated against the same
+    allow-lists used at startup (see config.py).
+    """
+    price_model: Optional[str] = Field(
+        default=None,
+        description="One of: darts_naive_blend | isotonic | darts | hybrid",
+    )
+    calibrator: Optional[str] = Field(
+        default=None,
+        description="One of: isotonic | monotone_gbm",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +430,144 @@ async def trigger_load_train(background_tasks: BackgroundTasks) -> TriggerRespon
         )
     background_tasks.add_task(_load_train_job, _load_engine)
     return TriggerResponse(triggered=True, message="Load train cycle enqueued")
+
+
+@app.get("/config", response_model=ConfigResponse)
+async def get_config() -> ConfigResponse:
+    """
+    Return the effective runtime forecast config (price_model + calibrator + region).
+
+    The HA integration calls this to default its picker to the live sidecar state.
+    """
+    _assert_ready()
+    return ConfigResponse(
+        price_model=_sidecar_config.price_model,
+        calibrator=_sidecar_config.calibrator,
+        region=_sidecar_config.region,
+    )
+
+
+@app.post("/config", response_model=ConfigResponse)
+async def post_config(request: ConfigUpdateRequest) -> ConfigResponse:
+    """
+    Change the price model and/or calibrator at runtime, then re-predict.
+
+    This is the missing link that makes the HA integration's method picker real:
+    the sidecar reads SIDECAR_PRICE_MODEL / SIDECAR_CALIBRATOR from env only at
+    startup, so without this endpoint a UI choice could never reach the engine.
+
+    On a valid request we (under a lock, serialised against the scheduler's
+    predict cycle):
+      1. mutate the live SidecarConfig (price_model / calibrator),
+      2. rebuild both calibrators for the new backend,
+      3. re-seed them from the persisted observation store (so a calibrator
+         switch never throws away accumulated calibration),
+      4. lazily initialise the Darts price model if switching into a Darts mode,
+      5. update the cache metadata, then
+      6. force an immediate re-predict (off the event loop).
+
+    Returns the new effective {price_model, calibrator, region}.
+    Rejects unknown values with HTTP 400.
+    """
+    _assert_ready()
+
+    if request.price_model is None and request.calibrator is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide at least one of price_model / calibrator",
+        )
+    if (
+        request.price_model is not None
+        and request.price_model not in _VALID_PRICE_MODELS
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"price_model must be one of {sorted(_VALID_PRICE_MODELS)}, "
+                f"got: {request.price_model!r}"
+            ),
+        )
+    if (
+        request.calibrator is not None
+        and request.calibrator not in _VALID_CALIBRATORS
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"calibrator must be one of {sorted(_VALID_CALIBRATORS)}, "
+                f"got: {request.calibrator!r}"
+            ),
+        )
+
+    # Apply the mutation + calibrator rebuild on the executor under the lock,
+    # then force a re-predict (mirrors the startup _price_predict_job pattern).
+    await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: _apply_runtime_config(request.price_model, request.calibrator),
+    )
+
+    return ConfigResponse(
+        price_model=_sidecar_config.price_model,
+        calibrator=_sidecar_config.calibrator,
+        region=_sidecar_config.region,
+    )
+
+
+def _apply_runtime_config(
+    price_model: Optional[str],
+    calibrator: Optional[str],
+) -> None:
+    """
+    Mutate config + rebuild calibrators + re-predict.  Runs on a worker thread.
+
+    Guarded by _config_lock so it cannot race the scheduler's predict cycle.
+    """
+    with _config_lock:
+        if price_model is not None:
+            _sidecar_config.price_model = price_model
+            _price_engine._config.price_model = price_model
+        if calibrator is not None:
+            _sidecar_config.calibrator = calibrator
+            _price_engine._config.calibrator = calibrator
+
+        # Rebuild both calibrators for the (possibly) new backend, then re-seed
+        # them from the persisted observation store so a switch never discards
+        # the accumulated calibration corpus.
+        _price_engine._import_calibrator = _price_engine._build_calibrator()
+        _price_engine._export_calibrator = _price_engine._build_calibrator()
+        _price_engine.restore_calibration_from_store()
+
+        # If we just switched into a Darts-backed mode and the model object was
+        # never created (started in a non-Darts mode), build + load it now so the
+        # new mode actually predicts with Darts rather than silently falling back.
+        if (
+            _price_engine._config.price_model in ("darts", "hybrid", "darts_naive_blend")
+            and _price_engine._darts_price_model is None
+        ):
+            _price_engine._initialise_darts_price_model()
+            try:
+                _price_engine._darts_price_model.load_model_with_bundled_fallback(
+                    _sidecar_config.data_dir, _sidecar_config.region
+                )
+            except Exception as load_error:  # pragma: no cover - defensive
+                _LOGGER.warning(
+                    "Runtime config: Darts model load failed (will self-train): %s",
+                    load_error,
+                )
+
+        _forecast_cache.update_metadata(price_model=_sidecar_config.price_model)
+
+        _LOGGER.info(
+            "Runtime config applied: price_model=%s calibrator=%s",
+            _sidecar_config.price_model,
+            _sidecar_config.calibrator,
+        )
+
+    # Force an immediate re-predict so the new config takes effect right away.
+    try:
+        _price_engine.run_predict_cycle(force=True)
+    except Exception as predict_error:  # pragma: no cover - defensive
+        _LOGGER.error("Runtime config: forced re-predict failed: %s", predict_error)
 
 
 # ---------------------------------------------------------------------------

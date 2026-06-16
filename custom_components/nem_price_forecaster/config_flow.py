@@ -27,37 +27,92 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .const import (
+    CALIBRATOR_OPTIONS,
     CONF_BAND_NAME,
     CONF_BAND_RATE_PER_KWH,
     CONF_BAND_WINDOWS,
     CONF_CALIBRATION_MIN_OBSERVATIONS,
     CONF_CALIBRATION_WINDOW_DAYS,
+    CONF_CALIBRATOR,
     CONF_FEED_IN_IS_WHOLESALE,
     CONF_FIXED_ADDER_PER_KWH,
     CONF_FORECAST_HORIZON_HOURS,
     CONF_FORECAST_PERIOD_MINUTES,
     CONF_GST_RATE,
     CONF_PLAUSIBILITY_CAP_DOLLARS_PER_KWH,
+    CONF_PRICE_MODEL,
     CONF_REGION,
     CONF_SIDECAR_URL,
     CONF_TOU_BANDS,
     DEFAULT_CALIBRATION_MIN_OBSERVATIONS,
     DEFAULT_CALIBRATION_WINDOW_DAYS,
+    DEFAULT_CALIBRATOR,
     DEFAULT_FEED_IN_IS_WHOLESALE,
     DEFAULT_FIXED_ADDER_PER_KWH,
     DEFAULT_FORECAST_HORIZON_HOURS,
     DEFAULT_FORECAST_PERIOD_MINUTES,
     DEFAULT_GST_RATE,
     DEFAULT_PLAUSIBILITY_CAP_DOLLARS_PER_KWH,
+    DEFAULT_PRICE_MODEL,
     DEFAULT_SIDECAR_URL,
     DOMAIN,
     FORECAST_PERIOD_OPTIONS,
     NEM_REGIONS,
+    PRICE_MODEL_OPTIONS,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Friendly labels for the price-model + calibrator pickers.  The SelectSelector
+# shows these labels but stores the underlying value (which the sidecar accepts).
+_PRICE_MODEL_LABELS = {
+    "isotonic": "Isotonic per-hour calibration (default, most robust)",
+    "darts_naive_blend": "Darts + seasonal-naive blend (price bake-off winner)",
+    "darts": "Darts LightGBM (full-horizon ML)",
+    "hybrid": "Hybrid (Darts near-term + isotonic long-term)",
+}
+_CALIBRATOR_LABELS = {
+    "monotone_gbm": "Monotone-GBM (default, never-lose vs isotonic)",
+    "isotonic": "Isotonic (per-hour PAV)",
+}
+
+
+def _price_model_selector() -> SelectSelector:
+    """Dropdown selector for the price model."""
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[
+                SelectOptionDict(
+                    value=value, label=_PRICE_MODEL_LABELS.get(value, value)
+                )
+                for value in PRICE_MODEL_OPTIONS
+            ],
+            mode=SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _calibrator_selector() -> SelectSelector:
+    """Dropdown selector for the calibrator backend."""
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[
+                SelectOptionDict(
+                    value=value, label=_CALIBRATOR_LABELS.get(value, value)
+                )
+                for value in CALIBRATOR_OPTIONS
+            ],
+            mode=SelectSelectorMode.DROPDOWN,
+        )
+    )
 
 # Example ToU bands JSON shown in the UI hint
 _TOU_BANDS_EXAMPLE = json.dumps(
@@ -122,6 +177,14 @@ class NemPriceForecastConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 self._config_data.update(user_input)
                 self._config_data[CONF_SIDECAR_URL] = sidecar_url
+                # Best-effort: push the chosen model/calibrator to the sidecar now.
+                # The authoritative apply also happens in __init__ on entry setup,
+                # so a sidecar that's still warming up here is fine.
+                await _async_push_model_config(
+                    sidecar_url,
+                    user_input.get(CONF_PRICE_MODEL, DEFAULT_PRICE_MODEL),
+                    user_input.get(CONF_CALIBRATOR, DEFAULT_CALIBRATOR),
+                )
                 return await self.async_step_tariff()
 
         # Suggest region from HA lat/long (hass attribute may be None in stubs/tests)
@@ -131,6 +194,12 @@ class NemPriceForecastConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Optional(CONF_SIDECAR_URL, default=DEFAULT_SIDECAR_URL): str,
                 vol.Required(CONF_REGION, default=suggested_region): vol.In(NEM_REGIONS),
+                vol.Optional(
+                    CONF_PRICE_MODEL, default=DEFAULT_PRICE_MODEL
+                ): _price_model_selector(),
+                vol.Optional(
+                    CONF_CALIBRATOR, default=DEFAULT_CALIBRATOR
+                ): _calibrator_selector(),
                 vol.Optional(
                     CONF_CALIBRATION_WINDOW_DAYS,
                     default=DEFAULT_CALIBRATION_WINDOW_DAYS,
@@ -346,10 +415,31 @@ class NemPriceForecastOptionsFlow(config_entries.OptionsFlow):
                 user_input[CONF_TOU_BANDS] = current_data.get(CONF_TOU_BANDS, [])
 
             if not errors:
+                # Push the chosen model/calibrator to the running sidecar so the
+                # change takes effect immediately (the reload triggered by the
+                # update listener also re-applies it, for consistency).
+                sidecar_url = current_data.get(CONF_SIDECAR_URL, DEFAULT_SIDECAR_URL)
+                await _async_push_model_config(
+                    sidecar_url,
+                    user_input.get(CONF_PRICE_MODEL, DEFAULT_PRICE_MODEL),
+                    user_input.get(CONF_CALIBRATOR, DEFAULT_CALIBRATOR),
+                )
                 return self.async_create_entry(title="", data=user_input)
+
+        # Default the picker to the sidecar's CURRENT effective config when
+        # reachable; otherwise fall back to the stored options/data, then defaults.
+        current_model, current_calibrator = await self._async_current_model_defaults(
+            current_data
+        )
 
         schema = vol.Schema(
             {
+                vol.Optional(
+                    CONF_PRICE_MODEL, default=current_model
+                ): _price_model_selector(),
+                vol.Optional(
+                    CONF_CALIBRATOR, default=current_calibrator
+                ): _calibrator_selector(),
                 vol.Optional(
                     CONF_GST_RATE,
                     default=current_data.get(CONF_GST_RATE, DEFAULT_GST_RATE),
@@ -393,6 +483,80 @@ class NemPriceForecastOptionsFlow(config_entries.OptionsFlow):
             data_schema=schema,
             errors=errors,
         )
+
+    async def _async_current_model_defaults(
+        self, current_data
+    ) -> tuple[str, str]:
+        """
+        Resolve the price_model + calibrator to pre-select in the options form.
+
+        Priority: live sidecar /config > stored entry options > entry data >
+        package defaults.  A sidecar that's unreachable is non-fatal.
+        """
+        stored_model = self._config_entry.options.get(
+            CONF_PRICE_MODEL,
+            current_data.get(CONF_PRICE_MODEL, DEFAULT_PRICE_MODEL),
+        )
+        stored_calibrator = self._config_entry.options.get(
+            CONF_CALIBRATOR,
+            current_data.get(CONF_CALIBRATOR, DEFAULT_CALIBRATOR),
+        )
+
+        sidecar_url = current_data.get(CONF_SIDECAR_URL, DEFAULT_SIDECAR_URL)
+        try:
+            from .sidecar_client import SidecarClient, SidecarUnavailable
+
+            client = SidecarClient(sidecar_url)
+            try:
+                live = await client.async_get_config()
+                return (
+                    live.get("price_model", stored_model),
+                    live.get("calibrator", stored_calibrator),
+                )
+            except SidecarUnavailable:
+                return stored_model, stored_calibrator
+            finally:
+                await client.async_close()
+        except Exception:  # pragma: no cover - never block the options form
+            return stored_model, stored_calibrator
+
+
+# ---------------------------------------------------------------------------
+# Sidecar runtime-config push (shared by the install + options flows)
+# ---------------------------------------------------------------------------
+
+async def _async_push_model_config(
+    sidecar_url: str,
+    price_model: str,
+    calibrator: str,
+) -> None:
+    """
+    Best-effort POST /config to the sidecar.  Never raises — a sidecar that is
+    down during setup is fine because __init__.async_setup_entry re-applies the
+    stored choice when the entry loads.
+    """
+    try:
+        from .sidecar_client import SidecarClient, SidecarUnavailable
+
+        client = SidecarClient(sidecar_url)
+        try:
+            await client.async_post_config(
+                price_model=price_model, calibrator=calibrator
+            )
+            _LOGGER.debug(
+                "Pushed model config to sidecar: price_model=%s calibrator=%s",
+                price_model,
+                calibrator,
+            )
+        except SidecarUnavailable as push_error:
+            _LOGGER.debug(
+                "Sidecar /config push failed (non-fatal, re-applied on setup): %s",
+                push_error,
+            )
+        finally:
+            await client.async_close()
+    except Exception as unexpected:  # pragma: no cover - never block the flow
+        _LOGGER.debug("Sidecar /config push skipped: %s", unexpected)
 
 
 # ---------------------------------------------------------------------------

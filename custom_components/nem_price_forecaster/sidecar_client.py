@@ -77,6 +77,34 @@ class SidecarClient:
         """Fetch /health from the sidecar (used by config_flow to test connectivity)."""
         return await self._async_get("/health")
 
+    async def async_get_config(self) -> dict[str, Any]:
+        """
+        Fetch /config from the sidecar — the effective {price_model, calibrator,
+        region}.  Used by the config/options flow to default the picker to the
+        sidecar's current runtime state.  Raises SidecarUnavailable on error.
+        """
+        return await self._async_get("/config")
+
+    async def async_post_config(
+        self,
+        price_model: Optional[str] = None,
+        calibrator: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Push a price_model / calibrator change to the sidecar via POST /config.
+
+        Only non-None fields are sent (the sidecar leaves omitted fields
+        unchanged).  Returns the sidecar's new effective config dict.
+        Raises SidecarUnavailable on connection / HTTP error (incl. 400 on an
+        invalid value), so the caller can surface it.
+        """
+        payload: dict[str, Any] = {}
+        if price_model is not None:
+            payload["price_model"] = price_model
+        if calibrator is not None:
+            payload["calibrator"] = calibrator
+        return await self._async_post_json("/config", payload)
+
     async def async_post_import_calibration(
         self,
         predicted_rrp_per_mwh: float,
@@ -185,6 +213,29 @@ class SidecarClient:
                     raise SidecarUnavailable(
                         f"Sidecar POST {path} returned HTTP {response.status}: {body[:200]}"
                     )
+        except SidecarUnavailable:
+            raise
+        except Exception as connection_error:
+            raise SidecarUnavailable(
+                f"Sidecar POST {path} failed: {connection_error}"
+            ) from connection_error
+
+    async def _async_post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST and return the parsed JSON response body (no retries).
+
+        Used for endpoints whose response matters (e.g. /config returns the new
+        effective config).  Raises SidecarUnavailable on any non-2xx or error.
+        """
+        session = await self._ensure_session()
+        url = f"{self._base_url}{path}"
+        try:
+            async with session.post(url, json=payload, timeout=_build_timeout()) as response:
+                if response.status not in (200, 202):
+                    body = await response.text()
+                    raise SidecarUnavailable(
+                        f"Sidecar POST {path} returned HTTP {response.status}: {body[:200]}"
+                    )
+                return await response.json()
         except SidecarUnavailable:
             raise
         except Exception as connection_error:
