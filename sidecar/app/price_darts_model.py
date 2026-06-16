@@ -579,9 +579,19 @@ class DartsLightGBMPriceForecaster:
         """Restore a previously saved Darts price model.
 
         Also loads the companion metadata file (if present) so that
-        _training_has_weather is correctly restored — without it a
-        weather-trained model would receive a mismatched covariate
-        matrix at predict time (calendar-only vs calendar+weather).
+        _training_has_weather, _training_has_pd7day_past, _lags, and
+        _output_chunk_length are correctly restored — without these the
+        instance would keep constructor defaults that do not match the
+        persisted Darts model, causing covariate-shape and covariate-window
+        errors at predict time:
+
+          * A weather-trained model would receive a mismatched covariate
+            matrix (calendar-only vs calendar+weather).
+          * If self._output_chunk_length does not match the persisted
+            model's output_chunk_length, _darts_predict computes the wrong
+            ``autoregression_tail`` length and the past_covariates series
+            ends up too short — Darts raises ``past_covariates are not
+            long enough`` and the forecast is discarded.
         """
         model_path = os.path.join(model_dir, _MODEL_FILENAME)
         meta_path = model_path + ".meta.json"
@@ -636,13 +646,43 @@ class DartsLightGBMPriceForecaster:
                     )
                     pd7day_source = f"introspected({inferred_past_count})"
 
+            # Restore lags + output_chunk_length so _darts_predict builds the
+            # correct covariate windows.  Without this the instance keeps the
+            # __init__ defaults (e.g. 96, 336) while the persisted model has
+            # its own training-time values (e.g. 96, 48 for the bundled
+            # QLD1 model), and the autoregression_tail computation in
+            # _darts_predict comes out wrong (zero instead of
+            # num_slots - persisted_output_chunk_length), so past_covariates
+            # are too short and Darts errors.  Prefer meta values; fall back
+            # to introspecting the loaded LightGBMModel attributes.
+            persisted_lags = meta.get("lags")
+            persisted_ocl = meta.get("output_chunk_length")
+            if persisted_lags is None:
+                persisted_lags = getattr(self._model, "lags", None)
+                # Darts stores lags as a dict like {'target': [-96, -95, ..., -1]}
+                # for newer versions; reduce it back to a positive int window.
+                if isinstance(persisted_lags, dict):
+                    target_lags = persisted_lags.get("target") or []
+                    if target_lags:
+                        persisted_lags = -min(target_lags)
+                    else:
+                        persisted_lags = None
+            if persisted_ocl is None:
+                persisted_ocl = getattr(self._model, "output_chunk_length", None)
+            if isinstance(persisted_lags, int) and persisted_lags > 0:
+                self._lags = persisted_lags
+            if isinstance(persisted_ocl, int) and persisted_ocl > 0:
+                self._output_chunk_length = persisted_ocl
+
             _LOGGER.info(
                 "Price Darts model loaded from %s (training_has_weather=%s, "
-                "training_has_pd7day_past=%s [%s])",
+                "training_has_pd7day_past=%s [%s], lags=%d, output_chunk_length=%d)",
                 model_path,
                 self._training_has_weather,
                 self._training_has_pd7day_past,
                 pd7day_source,
+                self._lags,
+                self._output_chunk_length,
             )
             return True
         except Exception as load_error:
