@@ -103,8 +103,7 @@ CALIBRATION_SAVE_INTERVAL_MINUTES = 30
 CONF_SIDECAR_URL = "sidecar_url"
 DEFAULT_SIDECAR_URL = "http://localhost:8765"
 
-# Sidecar price model selection
-CONF_PRICE_MODEL = "price_model"
-PRICE_MODEL_ISOTONIC = "isotonic"
-PRICE_MODEL_DARTS = "darts"
-DEFAULT_PRICE_MODEL = PRICE_MODEL_ISOTONIC
+# NOTE: the price model + calibrator are configured in the SIDECAR (add-on
+# options or docker env via SIDECAR_PRICE_MODEL / SIDECAR_CALIBRATOR), NOT in
+# this integration.  The former CONF_PRICE_MODEL config-flow selector was dead
+# (never forwarded to the sidecar) and has been removed.

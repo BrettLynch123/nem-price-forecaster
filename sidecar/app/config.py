@@ -9,7 +9,8 @@ Environment variables (all prefixed SIDECAR_):
     SIDECAR_DATA_DIR            Directory for model + calibration persistence (default /data)
     SIDECAR_CONFIG_FILE         Path to a JSON config file (default /data/config.json)
     SIDECAR_PRICE_MODEL         darts_naive_blend | isotonic | darts | hybrid
-                                (default darts_naive_blend)
+                                (default isotonic — the calibration bake-off winner
+                                paired with the monotone_gbm calibrator)
                                 - darts_naive_blend: 50/50 mixture of Darts LightGBM and
                                   seasonal-naive (same-hour-same-DOW one-week-ago).
                                   Blending reduces worst-case regime-transition error
@@ -122,7 +123,9 @@ Environment variables (all prefixed SIDECAR_):
 
     --- Calibrator backend (isotonic vs monotone-GBM) ---
 
-    SIDECAR_CALIBRATOR          isotonic | monotone_gbm  (default isotonic)
+    SIDECAR_CALIBRATOR          isotonic | monotone_gbm  (default monotone_gbm —
+                                the calibration bake-off winner; never-lose
+                                isotonic fallback is retained internally)
                                 Selects HOW raw PD7DAY RRP is calibrated to a
                                 realised price (applies to the isotonic / hybrid
                                 paths; the Darts price models do their own thing).
@@ -188,9 +191,10 @@ class SidecarConfig:
     region: str = "NSW1"
     port: int = 8765
     data_dir: str = "/data"
-    # Shipped default: 50/50 Darts + seasonal-naive blend.
-    # Blending reduces worst-case regime-transition error vs the Darts model
-    # alone while matching seasonal-naive's average accuracy.
+    # Shipped default: isotonic price model paired with the monotone_gbm
+    # calibrator — the calibration bake-off winner.  All four price_model
+    # options (darts_naive_blend | isotonic | darts | hybrid) remain selectable
+    # via SIDECAR_PRICE_MODEL.
     price_model: str = "isotonic"
 
     # Hybrid price model parameters (used only when price_model="hybrid")
@@ -225,12 +229,12 @@ class SidecarConfig:
     forecast_period_minutes: int = 30
 
     # Calibrator backend — how raw PD7DAY RRP is mapped to a realised price for
-    # the isotonic / hybrid paths.  DEFAULT = "isotonic" (the shipped, human-gated
-    # baseline).  "monotone_gbm" is an OPT-IN LightGBM calibrator with a monotone
-    # constraint on the raw price + cyclic hour/dow features; it keeps a runtime
-    # never-lose fallback to isotonic (see monotone_gbm_calibrator.py).
-    # Isotonic stays the default deliberately — switching is
-    # an opt-in, human-gated change.
+    # the isotonic / hybrid paths.  DEFAULT = "monotone_gbm" (the calibration
+    # bake-off winner): a LightGBM calibrator with a monotone constraint on the
+    # raw price + cyclic hour/dow features.  It keeps a runtime never-lose
+    # fallback to isotonic (see monotone_gbm_calibrator.py), so it can only match
+    # or beat the shipped isotonic baseline.  Set SIDECAR_CALIBRATOR=isotonic to
+    # use the dependency-free per-hour PAV baseline instead.
     calibrator: str = "monotone_gbm"
 
     # Chain resolver — horizon-aware model chaining.

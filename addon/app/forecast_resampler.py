@@ -71,13 +71,29 @@ def resample_price_slots(
         return []
 
     if target_period_minutes == _NATIVE_SLOT_MINUTES:
-        return horizon_slots
+        resampled = horizon_slots
+    elif target_period_minutes < _NATIVE_SLOT_MINUTES:
+        resampled = _upsample_price_slots(horizon_slots, target_period_minutes, horizon_end_utc)
+    else:
+        resampled = _downsample_price_slots(
+            horizon_slots, target_period_minutes, now_utc, horizon_end_utc
+        )
 
-    if target_period_minutes < _NATIVE_SLOT_MINUTES:
-        return _upsample_price_slots(horizon_slots, target_period_minutes, horizon_end_utc)
+    # Normalise the PUBLISHED period-ending timestamp on every output slot.
+    # Each resampled slot covers [interval_start, interval_start + target_period);
+    # consumers plot interval_end (NEM/Amber period-ending convention).
+    return _stamp_period_ending(resampled, target_period_minutes)
 
-    # Downsample
-    return _downsample_price_slots(horizon_slots, target_period_minutes, now_utc, horizon_end_utc)
+
+def _stamp_period_ending(
+    slots: list[dict[str, Any]],
+    period_minutes: int,
+) -> list[dict[str, Any]]:
+    """Set interval_end = interval_start + period_minutes on each price slot."""
+    period = timedelta(minutes=period_minutes)
+    for slot in slots:
+        slot["interval_end"] = (_parse_iso(slot["interval_start"]) + period).isoformat()
+    return slots
 
 
 def resample_load_slots(

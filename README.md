@@ -35,6 +35,14 @@ Each configured region creates a device, **NEM Price Forecaster (REGION)**, with
 | **Export Price** | Forecast export (feed-in) price ($/kWh). |
 | **Load Forecast** | Optional household load forecast (opt-in; requires HA recorder history). |
 
+Each forecast slot in the `forecast` attribute carries both `interval_start`
+(period-beginning) and `interval_end`. **Published timestamps follow the NEM /
+Amber period-ending convention**: the price for the period
+`[interval_start, interval_end)` is labelled by its **end**, so plot or overlay
+on `interval_end` to line up with Amber and AEMO settlement. The
+period-beginning `interval_start` is retained for reference and is what the
+integration uses internally to select the current slot.
+
 ## Installation
 
 You need two things: the **sidecar engine** running somewhere reachable from
@@ -106,9 +114,20 @@ add-on options. The full reference lives in
 - **`isotonic`** (default) — per-hour isotonic (PAV) calibration of AEMO's PD7DAY
   predispatch. Best when predispatch tracks settlement closely; weaker when
   PD7DAY diverges.
-- **`darts`** — Darts LightGBM only. Needs accumulated history to train.
+- **`darts`** — Darts LightGBM only. **QLD1 ships pre-trained**, so it is
+  Darts-backed on day one; other regions self-train once enough live price
+  history has accumulated (until then they fall back to the isotonic/naive path).
 - **`hybrid`** — isotonic for the near horizon, Darts beyond a configurable
   crossover (experimental).
+
+All four price models and both calibrators are available with **no external
+training for QLD1**: the `isotonic`/`monotone_gbm` calibrators activate from the
+bundled calibration seed, and the `darts`/`darts_naive_blend`/`hybrid` models use
+the bundled QLD1 Darts model — all from day one.
+
+The **price model and calibrator are configured in the sidecar** (add-on options
+or `SIDECAR_PRICE_MODEL` / `SIDECAR_CALIBRATOR` Docker env), not in the Home
+Assistant integration — the integration is a thin HTTP client and runs no ML.
 
 ### Calibrator backend
 

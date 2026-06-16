@@ -56,7 +56,8 @@ class ForecastSlot:
 
     All prices are in $/kWh.
     """
-    interval_start_utc: datetime     # UTC, tz-aware
+    interval_start_utc: datetime     # UTC, tz-aware — PERIOD-BEGINNING (internal)
+    interval_end_utc: datetime       # UTC, tz-aware — PERIOD-ENDING (published)
     raw_rrp_per_mwh: float
     calibrated_wholesale_kwh: float
     import_price_kwh: float
@@ -66,6 +67,7 @@ class ForecastSlot:
     def as_dict(self) -> dict[str, Any]:
         return {
             "interval_start": self.interval_start_utc.isoformat(),
+            "interval_end": self.interval_end_utc.isoformat(),
             "import_price": round(self.import_price_kwh, 6),
             "export_price": round(self.export_price_kwh, 6),
             "calibrated_wholesale": round(self.calibrated_wholesale_kwh, 6),
@@ -280,9 +282,18 @@ def _parse_price_slots(raw_list: list[dict[str, Any]]) -> list[ForecastSlot]:
     for raw_item in raw_list:
         try:
             interval_start = _parse_iso_or_now(raw_item.get("interval_start"))
+            # interval_end is the PERIOD-ENDING (published) stamp.  Fall back to
+            # start + 30 min (the native PD7DAY period) for older sidecars that
+            # don't yet emit interval_end.
+            interval_end_raw = raw_item.get("interval_end")
+            if interval_end_raw is not None:
+                interval_end = _parse_iso_or_now(interval_end_raw)
+            else:
+                interval_end = interval_start + timedelta(minutes=30)
             slots.append(
                 ForecastSlot(
                     interval_start_utc=interval_start,
+                    interval_end_utc=interval_end,
                     raw_rrp_per_mwh=float(raw_item.get("raw_rrp_per_mwh", 0.0)),
                     calibrated_wholesale_kwh=float(
                         raw_item.get("calibrated_wholesale_kwh", 0.0)

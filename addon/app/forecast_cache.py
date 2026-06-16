@@ -19,10 +19,14 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 _LOGGER = logging.getLogger(__name__)
+
+# Native PD7DAY dispatch-interval length in minutes.  Each raw price slot covers
+# [interval_start, interval_start + _NATIVE_SLOT_MINUTES).
+_NATIVE_SLOT_MINUTES = 30
 
 
 @dataclass
@@ -39,7 +43,7 @@ class PriceForecastSlot:
       "chain:seasonal_naive"    — chain resolver used seasonal-naive (unbounded)
     Consumers can filter on this field to distinguish validated from chained slots.
     """
-    interval_start: datetime         # UTC, tz-aware
+    interval_start: datetime         # UTC, tz-aware — PERIOD-BEGINNING (internal)
     raw_rrp_per_mwh: float           # unmodified PD7DAY value (0.0 for chain-only slots)
     calibrated_wholesale_kwh: float  # after isotonic / Darts calibration
     import_price_kwh: float          # retail import (calibrated + ToU + fixed + GST)
@@ -47,9 +51,15 @@ class PriceForecastSlot:
     network_tou_rate_kwh: float      # network component only
     model_segment: str = "primary"   # see docstring above
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self, period_minutes: int = _NATIVE_SLOT_MINUTES) -> dict[str, Any]:
+        # PUBLISHED timestamps follow the NEM/settlement (Amber) PERIOD-ENDING
+        # convention: the price for the period [interval_start, interval_end) is
+        # stamped at interval_end.  interval_start is kept (period-beginning) for
+        # internal forecast↔actual pairing; interval_end is what consumers plot.
+        interval_end = self.interval_start + timedelta(minutes=period_minutes)
         return {
             "interval_start": self.interval_start.isoformat(),
+            "interval_end": interval_end.isoformat(),
             "raw_rrp_per_mwh": round(self.raw_rrp_per_mwh, 4),
             "calibrated_wholesale_kwh": round(self.calibrated_wholesale_kwh, 6),
             "import_price_kwh": round(self.import_price_kwh, 6),

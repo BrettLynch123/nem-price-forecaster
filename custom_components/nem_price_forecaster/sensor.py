@@ -17,12 +17,21 @@ Exposes three sensor entities per config entry:
        Only created when load_forecaster_enabled=True.
 
 Both price sensors carry the same "forecast" attribute list, which contains
-import_price, export_price, calibrated_wholesale, raw_rrp_per_mwh, and
-network_tou_rate for each slot.  Downstream tools (EMHASS, Apex Charts,
-custom automations) can use the attribute directly.
+interval_start, interval_end, import_price, export_price, calibrated_wholesale,
+raw_rrp_per_mwh, and network_tou_rate for each slot.  Downstream tools (EMHASS,
+Apex Charts, custom automations) can use the attribute directly.
 
-The "current" state is the slot whose interval_start_utc is the most recently
-elapsed 30-minute boundary — i.e., the slot we are currently WITHIN.
+TIMESTAMP CONVENTION (period-ending):
+  Each slot carries BOTH timestamps.  `interval_end` is the PUBLISHED,
+  settlement-aligned stamp (the price for [interval_start, interval_end) is
+  labelled by its END) — this matches the NEM / Amber convention, so plot or
+  overlay on `interval_end`.  `interval_start` (period-beginning) is retained
+  for reference and is what the integration uses INTERNALLY to pick the current
+  slot.
+
+The "current" state is the slot whose half-open interval
+[interval_start, interval_end) contains now — i.e., the slot we are currently
+WITHIN.
 """
 
 from __future__ import annotations
@@ -130,17 +139,22 @@ class _NemPriceBaseSensor(CoordinatorEntity[NemPriceForecastCoordinator], Sensor
         return self.coordinator.data
 
     def _current_slot(self) -> ForecastSlot | None:
-        """Return the slot that covers the current moment."""
+        """Return the slot that covers the current moment.
+
+        The "current" slot is the one whose half-open interval
+        [interval_start, interval_end) contains now.  Selection uses the
+        PERIOD-BEGINNING interval_start (kept internal/unchanged) so that the
+        switch to period-ending PUBLISHED timestamps never shifts which slot is
+        treated as "now".  A robust fallback (last slot with start <= now <
+        start+30min) covers any malformed/gapped data.
+        """
         if not self.coordinator_data:
             return None
         now_utc = datetime.now(timezone.utc)
-        current_slot: ForecastSlot | None = None
         for forecast_slot in self.coordinator_data.forecast_slots:
-            if forecast_slot.interval_start_utc <= now_utc:
-                current_slot = forecast_slot
-            else:
-                break
-        return current_slot
+            if forecast_slot.interval_start_utc <= now_utc < forecast_slot.interval_end_utc:
+                return forecast_slot
+        return None
 
     def _common_extra_attributes(self) -> dict[str, Any]:
         """Attributes shared by both import and export sensors."""
@@ -193,6 +207,7 @@ class NemImportPriceSensor(_NemPriceBaseSensor):
         current_slot = self._current_slot()
         if current_slot:
             attrs["current_interval_start"] = current_slot.interval_start_utc.isoformat()
+            attrs["current_interval_end"] = current_slot.interval_end_utc.isoformat()
             attrs["current_network_tou_rate"] = round(
                 current_slot.network_tou_rate_kwh, 6
             )
@@ -236,6 +251,7 @@ class NemExportPriceSensor(_NemPriceBaseSensor):
         current_slot = self._current_slot()
         if current_slot:
             attrs["current_interval_start"] = current_slot.interval_start_utc.isoformat()
+            attrs["current_interval_end"] = current_slot.interval_end_utc.isoformat()
             attrs["current_raw_rrp_per_mwh"] = round(current_slot.raw_rrp_per_mwh, 4)
             attrs["current_calibrated_wholesale"] = round(
                 current_slot.calibrated_wholesale_kwh, 6

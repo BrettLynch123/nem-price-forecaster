@@ -3,7 +3,10 @@ Config flow for NEM Price Forecaster.
 
 Sets up the integration via the HA UI.  The flow collects:
 
-  Step 1 — sidecar: sidecar URL + region + price model
+  Step 1 — sidecar: sidecar URL + region + calibration settings
+           (the price model + calibrator are configured in the SIDECAR — via the
+           add-on options or docker env — not here, since the sidecar runs all ML
+           compute.)
   Step 2 — tariff: GST rate, fixed adder, feed-in toggle
   Step 3 — tou_bands: ToU network band definitions (may be skipped / empty)
   Step 4 — forecast: forecast horizon (hours) + forecast period (resolution)
@@ -39,7 +42,6 @@ from .const import (
     CONF_PLAUSIBILITY_CAP_DOLLARS_PER_KWH,
     CONF_REGION,
     CONF_SIDECAR_URL,
-    CONF_PRICE_MODEL,
     CONF_TOU_BANDS,
     DEFAULT_CALIBRATION_MIN_OBSERVATIONS,
     DEFAULT_CALIBRATION_WINDOW_DAYS,
@@ -50,12 +52,9 @@ from .const import (
     DEFAULT_GST_RATE,
     DEFAULT_PLAUSIBILITY_CAP_DOLLARS_PER_KWH,
     DEFAULT_SIDECAR_URL,
-    DEFAULT_PRICE_MODEL,
     DOMAIN,
     FORECAST_PERIOD_OPTIONS,
     NEM_REGIONS,
-    PRICE_MODEL_ISOTONIC,
-    PRICE_MODEL_DARTS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -98,7 +97,11 @@ class NemPriceForecastConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict | None = None
     ) -> FlowResult:
         """
-        Collect sidecar URL, NEM region, and price model selection.
+        Collect sidecar URL, NEM region, and calibration settings.
+
+        The price model + calibrator are NOT chosen here — they are sidecar
+        settings (add-on options / docker env).  The integration is a thin HTTP
+        client and never sends a model choice to the sidecar.
 
         Region auto-detection: HA's latitude/longitude is used to suggest the
         most likely NEM region.  Users can override.
@@ -128,10 +131,6 @@ class NemPriceForecastConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Optional(CONF_SIDECAR_URL, default=DEFAULT_SIDECAR_URL): str,
                 vol.Required(CONF_REGION, default=suggested_region): vol.In(NEM_REGIONS),
-                vol.Optional(
-                    CONF_PRICE_MODEL,
-                    default=DEFAULT_PRICE_MODEL,
-                ): vol.In([PRICE_MODEL_ISOTONIC, PRICE_MODEL_DARTS]),
                 vol.Optional(
                     CONF_CALIBRATION_WINDOW_DAYS,
                     default=DEFAULT_CALIBRATION_WINDOW_DAYS,

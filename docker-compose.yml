@@ -26,7 +26,10 @@ services:
       - "${SIDECAR_PORT:-8765}:8765"
     environment:
       - SIDECAR_REGION=${SIDECAR_REGION:-NSW1}
-      - SIDECAR_PRICE_MODEL=${SIDECAR_PRICE_MODEL:-darts_naive_blend}
+      # price_model: darts_naive_blend | isotonic | darts | hybrid
+      - SIDECAR_PRICE_MODEL=${SIDECAR_PRICE_MODEL:-isotonic}
+      # calibrator: isotonic | monotone_gbm  (default = bake-off winner)
+      - SIDECAR_CALIBRATOR=${SIDECAR_CALIBRATOR:-monotone_gbm}
       - SIDECAR_FORECAST_HORIZON_HOURS=${SIDECAR_FORECAST_HORIZON_HOURS:-168}
       - SIDECAR_FORECAST_PERIOD_MINUTES=${SIDECAR_FORECAST_PERIOD_MINUTES:-30}
       - SIDECAR_GST_RATE=${SIDECAR_GST_RATE:-0.10}

@@ -40,8 +40,8 @@ ports_description:
   8765/tcp: "NEM Price Forecaster sidecar HTTP API"
 options:
   region: "QLD1"
-  price_model: "darts_naive_blend"
-  calibrator: "isotonic"
+  price_model: "isotonic"
+  calibrator: "monotone_gbm"
   naive_blend_weight: 0.5
   forecast_horizon_days: 7.0
   forecast_horizon_hours: 168

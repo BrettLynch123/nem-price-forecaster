@@ -228,9 +228,29 @@ class PriceEngine:
             len(export_obs),
         )
 
-        # Restore Darts model if configured
+        # Restore Darts model if configured.  Precedence: the user's own
+        # self-trained model in data_dir wins; otherwise fall back to the
+        # region's bundled pre-trained model (read-only, shipped in the image)
+        # so a fresh install is Darts-backed on day 1.  Regions with no bundle
+        # leave the model untrained and self-train on the first predict cycle.
         if self._darts_price_model is not None:
-            self._darts_price_model.load_model(self._config.data_dir)
+            loaded = self._darts_price_model.load_model_with_bundled_fallback(
+                self._config.data_dir, self._config.region
+            )
+            if loaded:
+                _LOGGER.info(
+                    "PriceEngine: Darts price model restored "
+                    "(is_trained=%s, training_observations=%d)",
+                    self._darts_price_model.is_trained,
+                    self._darts_price_model.training_observation_count,
+                )
+            else:
+                _LOGGER.info(
+                    "PriceEngine: no pre-trained Darts price model available for %s "
+                    "(will self-train once enough history accumulates, or use "
+                    "seasonal-naive in the blend)",
+                    self._config.region,
+                )
 
     # ------------------------------------------------------------------
     # Main compute cycle (called by scheduler)
@@ -829,8 +849,49 @@ class PriceEngine:
             )
             return {}, False
 
-        # Refit-cache check: skip expensive re-train when nothing has changed
         current_pd7day_filename = self._pd7day_client._cached_filename
+
+        # Day-1 path: a pre-trained model was loaded (bundled image model or a
+        # user model persisted from a previous run) but we have NOT yet fit in
+        # this process session (_darts_last_fit_observation_count == -1).  Predict
+        # directly with the loaded model instead of triggering an expensive
+        # train-from-scratch on the first cycle.  This keeps a fresh install
+        # Darts-backed immediately and offline-safe (no AEMO/Open-Meteo fetch
+        # required to produce the first forecast).  A subsequent retrain (when the
+        # observation count later changes) transparently replaces it with a model
+        # fit on the user's own accumulated history.
+        no_fit_yet_this_session = self._darts_last_fit_observation_count == -1
+        if (
+            no_fit_yet_this_session
+            and self._darts_price_model is not None
+            and self._darts_price_model.is_trained
+        ):
+            try:
+                bundled_forecast = self._predict_with_loaded_darts(
+                    import_observations, forecast, now_utc
+                )
+            except Exception as bundled_predict_error:
+                _LOGGER.warning(
+                    "PriceEngine: prediction with pre-trained Darts model failed "
+                    "(%s); will attempt a fresh train+predict instead.",
+                    bundled_predict_error,
+                )
+                bundled_forecast = {}
+            if bundled_forecast:
+                self._darts_cached_forecast = bundled_forecast
+                self._darts_last_fit_pd7day_filename = current_pd7day_filename
+                # Leave _darts_last_fit_observation_count == -1 so that the next
+                # cycle with a CHANGED observation count triggers a real retrain
+                # on the user's own data; until then this loaded-model forecast is
+                # reused via the cache-hit branch above.
+                _LOGGER.info(
+                    "PriceEngine: produced day-1 forecast from pre-trained Darts "
+                    "model (%d slot predictions, no train required)",
+                    len(bundled_forecast),
+                )
+                return bundled_forecast, True
+
+        # Refit-cache check: skip expensive re-train when nothing has changed
         observation_count_unchanged = (
             actual_observation_count == self._darts_last_fit_observation_count
         )
@@ -1039,6 +1100,96 @@ class PriceEngine:
             len(all_training_observations),
         )
         return darts_rrp_by_slot_start, True
+
+    def _predict_with_loaded_darts(
+        self,
+        import_observations: list[CalibrationObservation],
+        forecast: Pd7DayForecast,
+        now_utc: datetime,
+    ) -> dict[datetime, float]:
+        """
+        Produce a per-slot RRP lookup using the ALREADY-LOADED Darts model,
+        without retraining.  Used on the first cycle after a bundled (or
+        previously-persisted) model is loaded, so a fresh install is Darts-backed
+        on day 1 without a train-from-scratch (which would need an AEMO archive
+        download + Open-Meteo fetch and several seconds of compute).
+
+        The recent-input tail is built from the available actual-price
+        observations (the bundled calibration seed and/or online /calibration
+        POSTs).  PD7DAY is passed as the past+future covariate signal exactly as
+        in the train+predict path.  Weather is fetched best-effort; if it is
+        unavailable the model's predict() zero-pads the weather columns (shape is
+        preserved) so the forecast still succeeds offline.
+
+        Returns {} if the model produces no prediction (caller falls back).
+        """
+        recent_price_observations = [
+            PriceObservation(
+                interval_start_utc=calibration_obs.observed_at,
+                rrp_per_mwh=calibration_obs.actual_rrp_per_mwh,
+            )
+            for calibration_obs in import_observations
+        ]
+        recent_price_observations.sort(key=lambda obs: obs.interval_start_utc)
+
+        # PD7DAY current file as the covariate signal (same as the train path).
+        pd7day_as_price_observations = [
+            PriceObservation(
+                interval_start_utc=price_slot.interval_start_utc,
+                rrp_per_mwh=price_slot.rrp_per_mwh,
+            )
+            for price_slot in forecast.slots
+        ]
+
+        # Best-effort weather forecast (only used if the loaded model was trained
+        # with weather; predict() zero-pads if it is None).
+        weather_forecast_map = None
+        if self._config.weather_enabled:
+            _, weather_forecast_map = self._fetch_weather_for_darts(
+                recent_price_observations, now_utc
+            )
+
+        tail_size = self._darts_price_model._lags * 2
+        recent_tail_observations = recent_price_observations[-tail_size:]
+
+        num_forecast_slots = len([
+            slot for slot in forecast.slots
+            if slot.interval_start_utc >= now_utc - timedelta(minutes=30)
+        ])
+
+        predicted_rrp_values = self._darts_price_model.forecast(
+            recent_observations=recent_tail_observations,
+            forecast_start_utc=now_utc,
+            num_slots=max(num_forecast_slots, 1),
+            pd7day_forecast=pd7day_as_price_observations,
+            weather_forecast=weather_forecast_map,
+        )
+
+        if not predicted_rrp_values:
+            return {}
+
+        return self._map_darts_values_to_slots(
+            predicted_rrp_values, forecast, now_utc
+        )
+
+    @staticmethod
+    def _map_darts_values_to_slots(
+        predicted_rrp_values: list[float],
+        forecast: Pd7DayForecast,
+        now_utc: datetime,
+    ) -> dict[datetime, float]:
+        """Align an ordered list of predicted RRP values to the future PD7DAY slots."""
+        darts_rrp_by_slot_start: dict[datetime, float] = {}
+        future_slots = [
+            slot for slot in forecast.slots
+            if slot.interval_start_utc >= now_utc - timedelta(minutes=30)
+        ]
+        for slot_index, future_slot in enumerate(future_slots):
+            if slot_index < len(predicted_rrp_values):
+                darts_rrp_by_slot_start[future_slot.interval_start_utc] = (
+                    predicted_rrp_values[slot_index]
+                )
+        return darts_rrp_by_slot_start
 
     def _fetch_weather_for_darts(
         self,

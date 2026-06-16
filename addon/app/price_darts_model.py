@@ -94,6 +94,12 @@ _RECENCY_BOOST_FACTOR = 2.0
 _MODEL_FILENAME = "price_darts_model.pkl"
 _CALENDAR_LAG_POSITIONS = [-48, -96]
 
+# Region(s) that ship a pre-trained Darts price model bundled in the image.
+# The bundled model lets a fresh install produce a Darts-backed forecast on day 1
+# instead of waiting to self-train once enough live history has accumulated.
+# Other regions self-train (or fall back to seasonal-naive) as before.
+_BUNDLED_MODEL_REGIONS = {"QLD1"}
+
 # Weather variable column names in the combined covariate array.
 # Order must match the column order in _build_weather_covariate_values().
 _WEATHER_COLUMNS = [
@@ -404,29 +410,43 @@ class DartsLightGBMPriceForecaster:
             tail_values = np.array([obs.rrp_per_mwh for obs in padded_obs], dtype=np.float64)
             input_ts = TimeSeries.from_times_and_values(pd.DatetimeIndex(tail_times), tail_values)
 
+            # ---- Autoregression tail length ----
+            # When num_slots > output_chunk_length, Darts auto-regresses and needs
+            # BOTH past and future covariates to extend (num_slots - output_chunk_length)
+            # steps beyond the input window (it consumes future values of the past
+            # covariates at each recursion step).  A few extra slots of slack guard
+            # against off-by-one boundary requirements inside Darts.
+            autoregression_tail = max(0, num_slots - self._output_chunk_length)
+
             # ---- Past covariates ----
-            # Calendar (lagged) + converged PD7DAY (lagged) for the input window
-            calendar_input = _build_calendar_covariate_values(tail_times)
+            # Calendar (lagged) + converged PD7DAY (lagged).  These MUST span the
+            # input window AND the autoregression tail — calendar is deterministic
+            # forward, and PD7DAY future values come from pd7day_forecast.
+            past_cov_times = tail_times + [
+                tail_times[-1] + timedelta(minutes=30 * (slot_idx + 1))
+                for slot_idx in range(autoregression_tail + 2)
+            ]
+            calendar_input = _build_calendar_covariate_values(past_cov_times)
 
             if pd7day_forecast and len(pd7day_forecast) > 0:
-                pd7day_input_values = self._align_pd7day_to_times(tail_times, pd7day_forecast)
+                pd7day_input_values = self._align_pd7day_to_times(past_cov_times, pd7day_forecast)
                 past_input_cov = np.column_stack([calendar_input, pd7day_input_values])
             else:
                 past_input_cov = calendar_input
 
-            # Past covariate series spans only the input window (no future extension required)
             past_covariate_ts = TimeSeries.from_times_and_values(
-                pd.DatetimeIndex(tail_times),
+                pd.DatetimeIndex(past_cov_times),
                 past_input_cov,
             )
 
             # ---- Future covariates ----
             # Calendar + weather for the full input + output window.
-            # The future covariate series must cover:
-            #   tail_times (input window) + output_chunk_length extra steps
+            # The future covariate series must cover the input window plus
+            # output_chunk_length AND the autoregression tail (Darts reads future
+            # covariate values at every recursion step beyond output_chunk_length).
             forecast_extra_times = [
                 tail_times[-1] + timedelta(minutes=30 * (slot_idx + 1))
-                for slot_idx in range(self._output_chunk_length + 2)
+                for slot_idx in range(self._output_chunk_length + autoregression_tail + 2)
             ]
             all_future_cov_times = tail_times + forecast_extra_times
             future_calendar_values = _build_calendar_covariate_values(all_future_cov_times)
@@ -560,6 +580,55 @@ class DartsLightGBMPriceForecaster:
         except Exception as load_error:
             _LOGGER.warning("Price Darts model load failed: %s", load_error)
             return False
+
+    @staticmethod
+    def bundled_model_dir(region: str) -> Optional[str]:
+        """Directory of the bundled pre-trained model for *region*, or None.
+
+        The bundled model lives next to the app code (app/models/<region_lower>/)
+        so it ships inside the Docker image (the Dockerfiles COPY app/ wholesale)
+        and is read-only — distinct from the writable <data_dir> the user's own
+        self-trained model accumulates in.  Returns the path only if the region
+        ships a bundled model AND the model file actually exists on disk.
+        """
+        if region.upper() not in _BUNDLED_MODEL_REGIONS:
+            return None
+        candidate_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "models",
+            region.lower(),
+        )
+        if os.path.exists(os.path.join(candidate_dir, _MODEL_FILENAME)):
+            return candidate_dir
+        return None
+
+    def load_model_with_bundled_fallback(self, model_dir: str, region: str) -> bool:
+        """Load the user's self-trained model, falling back to the bundled one.
+
+        Precedence (mirrors the calibrator-seed precedence in observation_store):
+          1. The user's own self-trained model in *model_dir* (the writable
+             <data_dir>), if present — this is the model the sidecar saved after
+             accumulating live history, and always wins.
+          2. Otherwise, the region's bundled pre-trained model (read-only, shipped
+             in the image) so a fresh install is Darts-backed on day 1.
+          3. Otherwise, leave the model untrained (caller self-trains or falls back
+             to seasonal-naive) — unchanged behaviour for regions with no bundle.
+
+        Returns True if a model was loaded from either source.
+        """
+        if self.load_model(model_dir):
+            return True
+        bundled_dir = self.bundled_model_dir(region)
+        if bundled_dir is not None:
+            if self.load_model(bundled_dir):
+                _LOGGER.info(
+                    "Price Darts model: loaded BUNDLED pre-trained model for %s "
+                    "from %s (fresh install — day-1 ready)",
+                    region.upper(),
+                    bundled_dir,
+                )
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Internal helpers
