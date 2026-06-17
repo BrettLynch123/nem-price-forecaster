@@ -90,8 +90,12 @@ async def async_setup_entry(
         NemExportPriceSensor(coordinator, config_entry),
     ]
 
-    # Add the load forecast sensor only when enabled
-    load_forecaster_enabled: bool = config_entry.data.get(
+    # Add the load forecast sensor only when enabled.  Read the merged
+    # data+options config (options take precedence) so enabling the load
+    # forecaster from the options flow surfaces the sensor on reload, matching
+    # the coordinator's own {**data, **options} precedence.
+    merged_config = {**config_entry.data, **config_entry.options}
+    load_forecaster_enabled: bool = merged_config.get(
         CONF_LOAD_FORECASTER_ENABLED, DEFAULT_LOAD_FORECASTER_ENABLED
     )
     if load_forecaster_enabled:

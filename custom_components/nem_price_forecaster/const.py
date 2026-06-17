@@ -11,6 +11,7 @@ NEM_REGIONS = ["QLD1", "NSW1", "VIC1", "SA1", "TAS1"]
 
 # Config entry keys
 CONF_REGION = "region"
+CONF_ACTUAL_RRP_ENTITY = "actual_rrp_entity"  # optional: realised RRP ($/MWh) sensor feeding calibration
 CONF_GST_RATE = "gst_rate"
 CONF_FIXED_ADDER_PER_KWH = "fixed_adder_per_kwh"
 CONF_TOU_BANDS = "tou_bands"
@@ -107,6 +108,30 @@ ATTR_LOAD_NEXT_TRAIN = "next_train"
 
 # Calibration persistence: save interval (how often to write to .storage/)
 CALIBRATION_SAVE_INTERVAL_MINUTES = 30
+
+# ---------------------------------------------------------------------------
+# Observation listener tuning (issue #9: wire actuals back to the sidecar)
+#
+# Two OPTIONAL HA entities can feed real-world observations to the sidecar:
+#   - CONF_ACTUAL_RRP_ENTITY: realised wholesale RRP ($/MWh) -> isotonic
+#     calibration (predicted PD7DAY raw RRP vs realised actual, per NEM hour).
+#   - CONF_LOAD_ENTITY_ID: live house-load power (W) -> load forecaster.
+# Absent => that observation path stays off (existing installs unaffected).
+# ---------------------------------------------------------------------------
+
+# Predicted-RRP buffer: how long a last-emitted prediction is retained while we
+# wait for the matching actual to arrive for that same interval-start.  Settled
+# RRP can lag the interval, so allow generous slack before TTL eviction.
+PREDICTION_BUFFER_TTL_HOURS = 6
+# Cap the prediction buffer so a long sidecar outage cannot grow it unbounded.
+PREDICTION_BUFFER_MAX_ENTRIES = 2000
+
+# Load sampling: ignore state ticks closer together than this (per the design,
+# load is sampled at most ~once/min rather than on every recorder update)...
+LOAD_SAMPLE_MIN_INTERVAL_SECONDS = 60
+# ...unless the reading moved by at least this many watts (a significant delta
+# is worth recording immediately even within the min-interval window).
+LOAD_SAMPLE_SIGNIFICANT_DELTA_WATTS = 500.0
 
 # Sidecar URL (new in sidecar architecture)
 CONF_SIDECAR_URL = "sidecar_url"
