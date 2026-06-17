@@ -49,12 +49,18 @@ COPY app/ /app/
 COPY run.sh /run.sh
 RUN chmod +x /run.sh
 
-# Data directory: the Supervisor maps the "share/nem_forecaster_data" path
-# declared in config.yaml to /nem_forecaster_data inside the container.
+# Data directory: the Supervisor maps the host /share directory onto
+# /nem_forecaster_data inside the container (see config.yaml `map:` block).
+# NPF then writes into a dedicated subdirectory so its state stays isolated
+# from other add-ons that also use /share (e.g. EMHASS).
+#   host:      /share/nem_forecaster_data/
+#   container: /nem_forecaster_data/nem_forecaster_data/  (= SIDECAR_DATA_DIR)
+# Legacy installs that wrote directly at /nem_forecaster_data are auto-migrated
+# into the subdir on first startup (see sidecar/app/main.py).
 VOLUME ["/nem_forecaster_data"]
 
 ENV PYTHONUNBUFFERED=1
-ENV SIDECAR_DATA_DIR=/nem_forecaster_data
+ENV SIDECAR_DATA_DIR=/nem_forecaster_data/nem_forecaster_data
 
 EXPOSE 8765
 
