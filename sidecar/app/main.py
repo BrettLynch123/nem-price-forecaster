@@ -486,7 +486,20 @@ def _inventory_data_dir(data_dir: str, region: str) -> "DataInventory":
     if not os.path.isdir(data_dir):
         return DataInventory(notes=[f"data_dir does not exist: {data_dir}"])
 
-    calibration_path = os.path.join(data_dir, f"calibration_{region}.json")
+    # The on-disk filename conventions in this codebase are inconsistent:
+    #   observation_store.py lowercases the region (calibration_qld1.json)
+    #   aemo_historical_client.py uppercases it (price_QLD1_YYYYMMDD.json)
+    # Cope with both so the inventory works regardless of which writer ran
+    # last and regardless of any future normalisation change.
+    region_lower = region.lower()
+    region_upper = region.upper()
+
+    calibration_path = os.path.join(data_dir, f"calibration_{region_lower}.json")
+    if not os.path.exists(calibration_path):
+        # Fallback: tolerate uppercase if the writer convention ever flips.
+        alt = os.path.join(data_dir, f"calibration_{region_upper}.json")
+        if os.path.exists(alt):
+            calibration_path = alt
     if os.path.exists(calibration_path):
         try:
             with open(calibration_path, encoding="utf-8") as calibration_file:
@@ -501,7 +514,11 @@ def _inventory_data_dir(data_dir: str, region: str) -> "DataInventory":
         calibration_import_count = 0
         calibration_export_count = 0
 
-    load_obs_path = os.path.join(data_dir, f"load_obs_{region}.json")
+    load_obs_path = os.path.join(data_dir, f"load_obs_{region_lower}.json")
+    if not os.path.exists(load_obs_path):
+        alt = os.path.join(data_dir, f"load_obs_{region_upper}.json")
+        if os.path.exists(alt):
+            load_obs_path = alt
     if os.path.exists(load_obs_path):
         try:
             with open(load_obs_path, encoding="utf-8") as load_obs_file:
@@ -519,7 +536,11 @@ def _inventory_data_dir(data_dir: str, region: str) -> "DataInventory":
         try:
             aemo_files = sorted(
                 f for f in os.listdir(aemo_archive_dir)
-                if f.startswith(f"price_{region}_") and f.endswith(".json")
+                if (
+                    f.startswith(f"price_{region_upper}_")
+                    or f.startswith(f"price_{region_lower}_")
+                )
+                and f.endswith(".json")
             )
         except OSError as aemo_listdir_error:
             notes.append(f"aemo_archive listdir failed: {aemo_listdir_error}")
