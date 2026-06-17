@@ -55,6 +55,12 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
 
     hass.data[DOMAIN][config_entry.entry_id] = coordinator
 
+    # Wire the optional observation listeners (issue #9): realised-RRP ->
+    # calibration, live house load -> load forecaster.  No-ops when the
+    # corresponding source entity is not configured, so existing installs are
+    # unaffected.  Teardown is registered via config_entry.async_on_unload().
+    coordinator.async_setup_observation_listeners()
+
     # Apply the stored price_model / calibrator to the sidecar so the runtime
     # config stays consistent with the integration's choice.  This runs on every
     # setup, which also covers options-flow changes (the update listener reloads

@@ -10,7 +10,9 @@
           "calibrator": "Calibrator",
           "calibration_window_days": "Calibration observation window (days)",
           "calibration_min_observations": "Minimum observations before calibration activates",
-          "plausibility_cap_dollars_per_kwh": "Price plausibility cap ($/kWh)"
+          "plausibility_cap_dollars_per_kwh": "Price plausibility cap ($/kWh)",
+          "actual_rrp_entity": "Actual RRP sensor (optional, $/MWh)",
+          "load_entity_id": "House-load power sensor (optional, W)"
         },
         "data_description": {
           "region": "Your NEM dispatch region (e.g. QLD1 for Queensland)",
@@ -18,7 +20,9 @@
           "calibrator": "How raw PD7DAY prices are mapped to realised prices. Monotone-GBM is the bake-off winner and can never do worse than isotonic.",
           "calibration_window_days": "How many days of historical (predicted, actual) price pairs to retain for calibration. Older observations are down-weighted exponentially.",
           "calibration_min_observations": "Number of (predicted, actual) pairs required before isotonic calibration activates. Until then, raw PD7DAY / 1000 is used.",
-          "plausibility_cap_dollars_per_kwh": "Calibrated prices above this cap are clamped. Protects against extreme market cap events propagating to retail prices."
+          "plausibility_cap_dollars_per_kwh": "Calibrated prices above this cap are clamped. Protects against extreme market cap events propagating to retail prices.",
+          "actual_rrp_entity": "Optional. A sensor reporting the realised wholesale RRP in $/MWh (e.g. an AEMO TRADINGPRICE feed). When set, each settled price is paired with the matching prediction and fed to the calibrator so it learns from actuals. Leave blank to disable.",
+          "load_entity_id": "Optional. A sensor reporting live household load power in watts (e.g. sensor.house_consumption_power). When set AND the load forecaster is enabled, readings are sampled and fed to the load forecaster. Leave blank to disable."
         }
       },
       "tariff": {
@@ -77,11 +81,18 @@
           "calibration_window_days": "Calibration window (days)",
           "forecast_horizon_hours": "Forecast horizon (hours)",
           "forecast_period_minutes": "Forecast period / resolution (minutes)",
+          "update_interval_minutes": "Coordinator update interval (minutes)",
+          "load_forecaster_enabled": "Enable load forecaster",
+          "actual_rrp_entity": "Actual RRP sensor (optional, $/MWh)",
+          "load_entity_id": "House-load power sensor (optional, W)",
           "tou_bands_json": "ToU bands (JSON array, leave blank to keep current)"
         },
         "data_description": {
           "price_model": "Applied to the sidecar immediately and re-predicts. Isotonic is the robust default; the Darts options use machine learning.",
-          "calibrator": "How raw PD7DAY prices map to realised prices. Monotone-GBM is the bake-off winner and never does worse than isotonic."
+          "calibrator": "How raw PD7DAY prices map to realised prices. Monotone-GBM is the bake-off winner and never does worse than isotonic.",
+          "load_forecaster_enabled": "Enable the house-load forecaster. Requires the sidecar's load endpoint and a house-load power sensor below to feed it live observations.",
+          "actual_rrp_entity": "Optional. A sensor reporting realised wholesale RRP in $/MWh. When set, settled prices are paired with the matching prediction and fed to the calibrator. Leave blank to disable.",
+          "load_entity_id": "Optional. A sensor reporting live household load power in watts. When set AND the load forecaster is enabled, readings are sampled and fed to the load forecaster. Leave blank to disable."
         }
       }
     },

@@ -28,6 +28,8 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -36,6 +38,7 @@ from homeassistant.helpers.selector import (
 
 from .const import (
     CALIBRATOR_OPTIONS,
+    CONF_ACTUAL_RRP_ENTITY,
     CONF_BAND_NAME,
     CONF_BAND_RATE_PER_KWH,
     CONF_BAND_WINDOWS,
@@ -47,6 +50,8 @@ from .const import (
     CONF_FORECAST_HORIZON_HOURS,
     CONF_FORECAST_PERIOD_MINUTES,
     CONF_GST_RATE,
+    CONF_LOAD_ENTITY_ID,
+    CONF_LOAD_FORECASTER_ENABLED,
     CONF_UPDATE_INTERVAL_MINUTES,
     CONF_PLAUSIBILITY_CAP_DOLLARS_PER_KWH,
     CONF_PRICE_MODEL,
@@ -61,6 +66,7 @@ from .const import (
     DEFAULT_FORECAST_HORIZON_HOURS,
     DEFAULT_FORECAST_PERIOD_MINUTES,
     DEFAULT_GST_RATE,
+    DEFAULT_LOAD_FORECASTER_ENABLED,
     DEFAULT_PLAUSIBILITY_CAP_DOLLARS_PER_KWH,
     DEFAULT_PRICE_MODEL,
     DEFAULT_SIDECAR_URL,
@@ -115,6 +121,11 @@ def _calibrator_selector() -> SelectSelector:
             mode=SelectSelectorMode.DROPDOWN,
         )
     )
+
+
+def _sensor_entity_selector() -> EntitySelector:
+    """Single-sensor picker for the optional observation source entities."""
+    return EntitySelector(EntitySelectorConfig(domain="sensor"))
 
 # Example ToU bands JSON shown in the UI hint
 _TOU_BANDS_EXAMPLE = json.dumps(
@@ -214,6 +225,14 @@ class NemPriceForecastConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_PLAUSIBILITY_CAP_DOLLARS_PER_KWH,
                     default=DEFAULT_PLAUSIBILITY_CAP_DOLLARS_PER_KWH,
                 ): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=50.0)),
+                # Optional observation sources (issue #9).  No default => the
+                # field is left blank, and the observation path stays off.
+                vol.Optional(
+                    CONF_ACTUAL_RRP_ENTITY
+                ): _sensor_entity_selector(),
+                vol.Optional(
+                    CONF_LOAD_ENTITY_ID
+                ): _sensor_entity_selector(),
             }
         )
 
@@ -434,6 +453,10 @@ class NemPriceForecastOptionsFlow(config_entries.OptionsFlow):
             current_data
         )
 
+        # Merge data + options so post-setup edits see the effective value (the
+        # coordinator reads the same {**data, **options} precedence).
+        merged_config = {**current_data, **self._config_entry.options}
+
         schema = vol.Schema(
             {
                 vol.Optional(
@@ -482,6 +505,27 @@ class NemPriceForecastOptionsFlow(config_entries.OptionsFlow):
                         CONF_UPDATE_INTERVAL_MINUTES, DEFAULT_UPDATE_INTERVAL_MINUTES
                     ),
                 ): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
+                # Observation wiring (issue #9) — editable post-setup so existing
+                # installs can enable calibration / load feedback without
+                # re-adding.  Leave an entity blank to turn that path off.
+                vol.Optional(
+                    CONF_LOAD_FORECASTER_ENABLED,
+                    default=merged_config.get(
+                        CONF_LOAD_FORECASTER_ENABLED, DEFAULT_LOAD_FORECASTER_ENABLED
+                    ),
+                ): bool,
+                vol.Optional(
+                    CONF_ACTUAL_RRP_ENTITY,
+                    description={
+                        "suggested_value": merged_config.get(CONF_ACTUAL_RRP_ENTITY)
+                    },
+                ): _sensor_entity_selector(),
+                vol.Optional(
+                    CONF_LOAD_ENTITY_ID,
+                    description={
+                        "suggested_value": merged_config.get(CONF_LOAD_ENTITY_ID)
+                    },
+                ): _sensor_entity_selector(),
                 vol.Optional("tou_bands_json", default=""): str,
             }
         )
