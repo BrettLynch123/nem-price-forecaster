@@ -200,6 +200,11 @@ class MonotoneGBMCalibrator:
         self._gbm_active = False               # True only when GBM passes never-lose
         self._fit_observation_count = -1       # for refit caching
         self._last_decision_reason = "uninitialised"
+        # Log-dedupe: only emit the GBM-vs-isotonic decision line when it
+        # changes (or on the first decision).  Without this, ``calibrate()``
+        # logs the same INFO line ~288 times per predict cycle because
+        # ``_maybe_fit`` is invoked once per future interval.
+        self._last_logged_decision_reason: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API (mirrors IsotonicCalibratorPerHour)
@@ -349,11 +354,15 @@ class MonotoneGBMCalibrator:
 
         Caches on observation count so repeated calibrate() calls within one
         predict cycle reuse a single fit, matching the isotonic calibrator's
-        refit-cache discipline.
+        refit-cache discipline.  The cache covers BOTH outcomes — GBM-active
+        and GBM-inactive (isotonic-fallback) — so an unchanged observation
+        set never re-runs the fit, regardless of which calibrator won last
+        time.  Without this, calibrate() would re-train LightGBM on every
+        future interval within a predict cycle (~288 times).
         """
         current_count = len(self._observations)
-        if self._model is not None and self._fit_observation_count == current_count:
-            return  # cache hit
+        if self._fit_observation_count == current_count:
+            return  # cache hit (covers both active and inactive outcomes)
 
         self._fit_observation_count = current_count
         self._model = None
@@ -509,11 +518,13 @@ class MonotoneGBMCalibrator:
                 f"GBM active: holdout MAE {gbm_mae_cents:.4f}c vs isotonic "
                 f"{iso_mae_cents:.4f}c (margin {self._never_lose_margin_cents:.2f}c)"
             )
-            _LOGGER.info(
-                "MonotoneGBM ACTIVE — holdout MAE %.4fc vs isotonic %.4fc "
-                "(%d train + %d holdout pairs)",
-                gbm_mae_cents, iso_mae_cents, train_count, holdout_size,
-            )
+            if self._last_logged_decision_reason != self._last_decision_reason:
+                _LOGGER.info(
+                    "MonotoneGBM ACTIVE — holdout MAE %.4fc vs isotonic %.4fc "
+                    "(%d train + %d holdout pairs)",
+                    gbm_mae_cents, iso_mae_cents, train_count, holdout_size,
+                )
+                self._last_logged_decision_reason = self._last_decision_reason
         else:
             self._model = None
             self._gbm_active = False
@@ -521,8 +532,10 @@ class MonotoneGBMCalibrator:
                 f"isotonic: GBM holdout MAE {gbm_mae_cents:.4f}c LOSES to "
                 f"isotonic {iso_mae_cents:.4f}c by > {self._never_lose_margin_cents:.2f}c"
             )
-            _LOGGER.info(
-                "MonotoneGBM stays INACTIVE — holdout MAE %.4fc loses to "
-                "isotonic %.4fc by > %.2fc; using isotonic",
-                gbm_mae_cents, iso_mae_cents, self._never_lose_margin_cents,
-            )
+            if self._last_logged_decision_reason != self._last_decision_reason:
+                _LOGGER.info(
+                    "MonotoneGBM stays INACTIVE — holdout MAE %.4fc loses to "
+                    "isotonic %.4fc by > %.2fc; using isotonic",
+                    gbm_mae_cents, iso_mae_cents, self._never_lose_margin_cents,
+                )
+                self._last_logged_decision_reason = self._last_decision_reason
